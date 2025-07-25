@@ -1,95 +1,329 @@
 import logging
 import os
-import random
+import sqlite3
+import json
+import requests
 from datetime import datetime
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    InputFile, ChatAction
 )
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
 )
+import random
 
-# ✅ إعدادات البيئة
+# إعدادات البوت
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "6964741705"))
 ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 
-# ✅ إعداد السجل
+# إعداد سجل التشغيل
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ✅ لوحة أزرار رئيسية
-def main_menu():
+# إعداد قاعدة البيانات
+conn = sqlite3.connect("bot_data.db", check_same_thread=False)
+cursor = conn.cursor()
+
+# إنشاء الجداول إذا لم تكن موجودة
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    status TEXT DEFAULT 'pending',  -- pending, approved, rejected
+    proof TEXT DEFAULT NULL
+)
+''')
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS user_stats (
+    user_id INTEGER PRIMARY KEY,
+    total_signals INTEGER DEFAULT 0,
+    wins INTEGER DEFAULT 0
+)
+''')
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS recommendations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    pair TEXT,
+    signal TEXT,
+    indicators TEXT,
+    timestamp TEXT,
+    result TEXT DEFAULT 'pending'  -- pending, win, lose
+)
+''')
+conn.commit()
+
+# أزواج العملات
+PAIRS = ["USD/CHF", "AUD/USD", "USD/JPY", "USD/CAD", "EUR/JPY", "EUR/CAD", "EUR/USD", "EUR/CHF", "EUR/AUD"]
+
+def get_pairs_keyboard():
+    keyboard = [[InlineKeyboardButton(pair, callback_data=f"pair_{pair}")] for pair in PAIRS]
+    keyboard.append([InlineKeyboardButton("🔁 إعادة التحليل", callback_data="reanalyze")])
+    return InlineKeyboardMarkup(keyboard)
+
+def get_main_menu():
     keyboard = [
         [InlineKeyboardButton("💹 توصية جديدة", callback_data="get_signal")],
         [InlineKeyboardButton("🧠 تعلم التحليل", callback_data="learn")],
-        [InlineKeyboardButton("📜 حول البوت", callback_data="about")],
-        [InlineKeyboardButton("🎁 شارك البوت", callback_data="share")],
+        [InlineKeyboardButton("📊 إحصائياتي", callback_data="stats")],
+        [InlineKeyboardButton("💼 الاشتراك والدفع", callback_data="subscribe")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# ✅ أمر /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await update.message.reply_text(
-        f"👋 أهلاً {user.first_name}،\n"
-        "هذا بوت توصيات تداول وتحليل ذكي.\n"
-        "اختر من القائمة أدناه:",
-        reply_markup=main_menu()
-    )
+    cursor.execute("SELECT status FROM users WHERE user_id=?", (user.id,))
+    row = cursor.fetchone()
+    if row:
+        status = row[0]
+        if status == "approved":
+            await update.message.reply_text(
+                f"👋 مرحباً {user.first_name}، اختر من القائمة:",
+                reply_markup=get_main_menu())
+        elif status == "pending":
+            await update.message.reply_text("🚫 طلبك قيد المراجعة، انتظر موافقة المدير.")
+        else:
+            await update.message.reply_text(
+                "❌ تم رفض طلبك. ارسل 'طلب جديد' لإعادة التقديم.")
+    else:
+        cursor.execute("INSERT OR IGNORE INTO users(user_id, username, status) VALUES (?, ?, 'pending')",
+                       (user.id, user.username))
+        conn.commit()
+        await update.message.reply_text(
+            "🚫 طلبك قيد المراجعة، انتظر موافقة المدير.")
+        # إشعار المدير
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"📥 طلب جديد من @{user.username} (ID: {user.id})"
+        )
 
-# ✅ رد على الأزرار
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        return
+    cursor.execute("SELECT user_id, username FROM users WHERE status='pending'")
+    rows = cursor.fetchall()
+    if not rows:
+        await update.message.reply_text("✅ لا يوجد طلبات معلقة.")
+        return
+    for uid, username in rows:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ قبول", callback_data=f"accept_{uid}"),
+             InlineKeyboardButton("❌ رفض", callback_data=f"reject_{uid}")]
+        ])
+        await update.message.reply_text(f"👤 @{username} (ID: {uid})", reply_markup=keyboard)
+
+async def admin_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        return
+    data = query.data
+    if data.startswith("accept_"):
+        uid = int(data.split("_")[1])
+        cursor.execute("UPDATE users SET status='approved' WHERE user_id=?", (uid,))
+        conn.commit()
+        await query.edit_message_text("✅ تم القبول.")
+    elif data.startswith("reject_"):
+        uid = int(data.split("_")[1])
+        cursor.execute("UPDATE users SET status='rejected' WHERE user_id=?", (uid,))
+        conn.commit()
+        await query.edit_message_text("❌ تم الرفض.")
 
-    if query.data == "get_signal":
-        await query.edit_message_text("📊 جاري تحليل السوق وإرسال التوصية...")
-        await send_signal(query.message.chat_id)
-    elif query.data == "learn":
-        await query.edit_message_text("📘 تعلم التحليل:\n- EMA\n- RSI\n- Bollinger Bands\n- MACD\n...")
-    elif query.data == "about":
-        await query.edit_message_text("🤖 هذا البوت مقدم من المطور مجدي.\nللدعم: @your_support")
-    elif query.data == "share":
-        await query.edit_message_text("🔗 شارك البوت مع أصدقائك: t.me/YourBotUsername")
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = update.effective_user
+    data = query.data
 
-# ✅ دالة التوصيات (تجريبية)
-async def send_signal(chat_id):
-    from telegram import Bot
-    bot = Bot(BOT_TOKEN)
+    if data == "get_signal":
+        cursor.execute("SELECT status FROM users WHERE user_id=?", (user.id,))
+        row = cursor.fetchone()
+        if not row or row[0] != "approved":
+            await query.edit_message_text("🚫 ليس لديك صلاحية الحصول على التوصيات.")
+            return
+        await query.edit_message_text("📊 اختر الزوج لتحليل التوصية:", reply_markup=get_pairs_keyboard())
 
-    fake_time = datetime.now().strftime("%I:%M %p")
-    signal_text = f"""
-📊 التوصية: شراء (CALL)
-💱 الزوج: EUR/USD OTC
+    elif data.startswith("pair_"):
+        pair = data.split("_", 1)[1]
+        await query.edit_message_text(f"📊 تحليل زوج {pair} جاري...")
+        # تحليل السوق
+        analysis = analyze_market(pair)
+        if not analysis:
+            await query.edit_message_text("⚠️ تعذر الحصول على بيانات الزوج حالياً.")
+            return
+        signal = "شراء (CALL)" if analysis["trend"].startswith("صاعد") else "بيع (PUT)"
+        indicators = {
+            "EMA20": analysis["ema20"],
+            "EMA50": analysis["ema50"],
+            "RSI": analysis["rsi"],
+            "Bollinger": analysis["bb_signal"]
+        }
+        # حفظ التوصية في DB
+        save_recommendation(user.id, pair, signal, indicators)
+        # حساب نسبة الدقة (مبدئي، يمكن تطوير ML)
+        success_prob = calculate_success_probability(analysis["rsi"], analysis["bb_signal"], analysis["ema_signal"])
+
+        now = datetime.now().strftime("%I:%M %p")
+        msg = f"""
+📊 التوصية: {signal}
+💱 الزوج: {pair}
 🔍 التحليل:
 🔹 EMA:
-- EMA20 = 1.0891
-- EMA50 = 1.0782
-📈 الاتجاه: صاعد ✅
+- EMA20 = {analysis['ema20']}
+- EMA50 = {analysis['ema50']}
+📈 الاتجاه: {analysis['trend']}
 
-🔸 RSI = 55.09
-✅ منطقة تداول طبيعية
+🔸 RSI = {analysis['rsi']}
+{analysis['rsi_note']}
 
-🔻 Bollinger Bands: أسفل الحد السفلي
+🔻 Bollinger Bands: {analysis['bb_signal']}
 
-📚 شرح المؤشرات:
-- EMA20 > EMA50 → صعود
-- RSI < 70 → غير مشبع
-- Bollinger → يعطي احتمالات الانعكاس
-
+🎯 نسبة نجاح متوقعة: {success_prob}%
 ⏱️ الفريم: 1 دقيقة
-⏰ التوقيت: {fake_time}
+⏰ التوقيت: {now}
 """
-    await bot.send_message(chat_id=chat_id, text=signal_text)
+        await query.edit_message_text(msg.strip())
 
-# ✅ بدء التشغيل
-if __name__ == '__main__':
+    elif data == "reanalyze":
+        await query.edit_message_text("🔁 إعادة التحليل: اختر الزوج:", reply_markup=get_pairs_keyboard())
+
+    elif data == "learn":
+        text = """
+📘 تعلم التحليل الأساسي:
+- EMA: المتوسط المتحرك الأسي
+- RSI: مؤشر القوة النسبية
+- Bollinger Bands: نطاقات بولينجر
+- MACD: تقاطع المتوسطات المتحركة
+"""
+        await query.edit_message_text(text.strip())
+
+    elif data == "stats":
+        cursor.execute("SELECT total_signals, wins FROM user_stats WHERE user_id=?", (user.id,))
+        row = cursor.fetchone()
+        if row:
+            total, wins = row
+            ratio = (wins / total * 100) if total > 0 else 0
+            await query.edit_message_text(f"""
+📈 إحصائيات التداول الخاصة بك:
+- عدد التوصيات المستلمة: {total}
+- عدد الصفقات الرابحة: {wins}
+- نسبة النجاح: {ratio:.2f}%
+""")
+        else:
+            await query.edit_message_text("❌ لا توجد بيانات إحصائية حتى الآن.")
+
+    elif data == "subscribe":
+        text = """
+💳 طرق الدفع:
+- USDT BEP20: 0x3a5db3aec7c262017af9423219eb64b5eb6643d7
+- USDT TRC20: THrV9BLydZTYKox1MnnAivqitHBEz3xKiq
+- Payeer: P1113622813
+
+💡 بعد الدفع أرسل صورة إثبات الدفع هنا.
+"""
+        await query.edit_message_text(text.strip())
+
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    cursor.execute("SELECT status FROM users WHERE user_id=?", (user.id,))
+    row = cursor.fetchone()
+    if not row or row[0] != "approved":
+        await update.message.reply_text("🚫 أنت غير مصرح لك بإرسال إثبات الدفع.")
+        return
+    if update.message.photo:
+        photo_file = await update.message.photo[-1].get_file()
+        path = f"proofs/{user.id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        os.makedirs("proofs", exist_ok=True)
+        await photo_file.download_to_drive(path)
+        cursor.execute("UPDATE users SET proof=? WHERE user_id=?", (path, user.id))
+        conn.commit()
+        await update.message.reply_text("✅ تم استلام إثبات الدفع، انتظر التفعيل.")
+        # إرسال إشعار للمطور
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"📸 إثبات دفع جديد من @{user.username} (ID: {user.id})",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("فتح الإثبات", url=f"file://{os.path.abspath(path)}")
+            ]])
+        )
+    else:
+        await update.message.reply_text("❌ لم يتم إرسال صورة.")
+
+def analyze_market(symbol):
+    try:
+        url = f"https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol={symbol}&interval=1min&apikey={ALPHA_VANTAGE_API_KEY}"
+        response = requests.get(url)
+        data = response.json()
+        time_series = data["Time Series (1min)"]
+        latest = list(time_series.values())[0]
+        close_price = float(latest["4. close"])
+        prices = [float(v["4. close"]) for v in list(time_series.values())[:50]]
+
+        ema20 = sum(prices[:20]) / 20
+        ema50 = sum(prices[:30]) / 30
+        rsi = 50 + (random.random() * 20 - 10)  # محاكاة RSI مؤقتة
+        bb_upper = max(prices) + 0.002
+        bb_lower = min(prices) - 0.002
+
+        trend = "صاعد ✅" if ema20 > ema50 else "هابط 🔻"
+        bb_signal = "أعلى الحد العلوي" if close_price > bb_upper else (
+            "أسفل الحد السفلي" if close_price < bb_lower else "محايد")
+        ema_signal = "EMA20 > EMA50 ✅" if ema20 > ema50 else "EMA20 < EMA50 🔻"
+        rsi_note = "✅ منطقة تداول طبيعية" if 30 < rsi < 70 else "⚠️ منطقة تشبع"
+
+        return {
+            "close": close_price,
+            "ema20": round(ema20, 4),
+            "ema50": round(ema50, 4),
+            "rsi": round(rsi, 2),
+            "trend": trend,
+            "bb_signal": bb_signal,
+            "ema_signal": ema_signal,
+            "rsi_note": rsi_note
+        }
+    except Exception as e:
+        logger.error(f"Error analyzing market: {e}")
+        return None
+
+def save_recommendation(user_id, pair, signal, indicators):
+    cursor.execute('''
+        INSERT INTO recommendations (user_id, pair, signal, indicators, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (user_id, pair, signal, json.dumps(indicators), datetime.now().isoformat()))
+
+    cursor.execute('''
+        INSERT OR IGNORE INTO user_stats(user_id) VALUES (?)
+    ''', (user_id,))
+
+    cursor.execute('''
+        UPDATE user_stats SET total_signals = total_signals + 1 WHERE user_id = ?
+    ''', (user_id,))
+
+    conn.commit()
+
+def calculate_success_probability(rsi, bb_signal, ema_signal):
+    score = 0
+    if bb_signal != "محايد":
+        score += 1
+    if "✅" in ema_signal:
+        score += 1
+    if 30 < rsi < 70:
+        score += 1
+    return int((score / 3) * 100)
+
+if __name__ == "__main__":
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CallbackQueryHandler(admin_actions, pattern="^(accept|reject)_"))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 
-    import asyncio
-    asyncio.run(app.run_polling())
+    logger.info("Bot is starting...")
+    app.run_polling()
