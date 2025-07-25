@@ -270,4 +270,4 @@ def analyze_market(symbol):
             "close": close_price,
             "ema20": round(ema20, 4),
             "ema50": round(ema50, 4),
-            "rsi": round(r
+            "rsi": round(rsi, 2),
