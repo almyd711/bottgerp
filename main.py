@@ -1,106 +1,68 @@
-# ✅ بوت توصيات تداول شامل - باستخدام متغيرات البيئة
-
-import os
 import logging
-import requests
+import os
+import random
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+)
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    CallbackQueryHandler, ContextTypes, filters
 )
 
-# ✅ الإعدادات
+# ✅ إعدادات البيئة
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "6964741705"))
 ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
-IMAGE_URL = "https://yourdomain.com/logo.jpg"  # رابط صورة البوت
 
-AUTHORIZED_USERS = set([ADMIN_ID])
-PENDING_USERS = {}
-
-# ✅ تفعيل اللوج
+# ✅ إعداد السجل
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# ✅ شاشة البدء
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    full_name = update.effective_user.full_name
-
-    if user_id not in AUTHORIZED_USERS:
-        if user_id in PENDING_USERS:
-            await update.message.reply_text("⏳ طلبك قيد المراجعة. الرجاء الانتظار.")
-        else:
-            PENDING_USERS[user_id] = full_name
-            keyboard = [
-                [
-                    InlineKeyboardButton("✅ قبول", callback_data=f"accept_{user_id}"),
-                    InlineKeyboardButton("❌ رفض", callback_data=f"reject_{user_id}")
-                ]
-            ]
-            markup = InlineKeyboardMarkup(keyboard)
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"🆕 طلب دخول جديد:\n👤 الاسم: {full_name}\n🆔 ID: {user_id}",
-                reply_markup=markup
-            )
-            await update.message.reply_text("🛑 البوت خاص. تم إرسال طلبك للمطور.")
-        return
-
-    await send_main_menu(update, context)
-
-# ✅ إرسال القائمة الرئيسية
-async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ✅ لوحة أزرار رئيسية
+def main_menu():
     keyboard = [
-        [InlineKeyboardButton("📊 EUR/USD OTC", callback_data='pair_EUR/USD')],
-        [InlineKeyboardButton("📘 تعلم التحليل", callback_data='learn')],
-        [InlineKeyboardButton("📤 مشاركة التوصية", switch_inline_query="")],
+        [InlineKeyboardButton("💹 توصية جديدة", callback_data="get_signal")],
+        [InlineKeyboardButton("🧠 تعلم التحليل", callback_data="learn")],
+        [InlineKeyboardButton("📜 حول البوت", callback_data="about")],
+        [InlineKeyboardButton("🎁 شارك البوت", callback_data="share")],
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_photo(
-        chat_id=update.effective_chat.id,
-        photo=IMAGE_URL,
-        caption="👋 مرحبًا بك في بوت التوصيات 👇 اختر ما تريد:",
-        reply_markup=reply_markup
+    return InlineKeyboardMarkup(keyboard)
+
+# ✅ أمر /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    await update.message.reply_text(
+        f"👋 أهلاً {user.first_name}،\n"
+        "هذا بوت توصيات تداول وتحليل ذكي.\n"
+        "اختر من القائمة أدناه:",
+        reply_markup=main_menu()
     )
 
-# ✅ أزرار القبول والرفض
-async def manage_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ✅ رد على الأزرار
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data
 
-    if data.startswith("accept_"):
-        uid = int(data.split("_")[1])
-        AUTHORIZED_USERS.add(uid)
-        PENDING_USERS.pop(uid, None)
-        await context.bot.send_message(uid, "✅ تم قبولك! يمكنك الآن استخدام البوت.")
-        await query.edit_message_text("تم قبول المستخدم.")
-    elif data.startswith("reject_"):
-        uid = int(data.split("_")[1])
-        PENDING_USERS.pop(uid, None)
-        await context.bot.send_message(uid, "❌ تم رفض طلبك. يمكنك إعادة الطلب لاحقًا.")
-        await query.edit_message_text("تم رفض المستخدم.")
+    if query.data == "get_signal":
+        await query.edit_message_text("📊 جاري تحليل السوق وإرسال التوصية...")
+        await send_signal(query.message.chat_id)
+    elif query.data == "learn":
+        await query.edit_message_text("📘 تعلم التحليل:\n- EMA\n- RSI\n- Bollinger Bands\n- MACD\n...")
+    elif query.data == "about":
+        await query.edit_message_text("🤖 هذا البوت مقدم من المطور مجدي.\nللدعم: @your_support")
+    elif query.data == "share":
+        await query.edit_message_text("🔗 شارك البوت مع أصدقائك: t.me/YourBotUsername")
 
-# ✅ التعامل مع الأزرار الرئيسية
-async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
+# ✅ دالة التوصيات (تجريبية)
+async def send_signal(chat_id):
+    from telegram import Bot
+    bot = Bot(BOT_TOKEN)
 
-    if data == "learn":
-        await query.edit_message_text("📘 تعلم التحليل:\n- EMA: المتوسطات المتحركة\n- RSI: مؤشر القوة النسبية\n- Bollinger: النطاقات السعرية\nالمزيد قريبًا...")
-        return
-
-    if data.startswith("pair_"):
-        pair = data.split("_")[1]
-        recommendation = await get_recommendation(pair)
-        await query.edit_message_caption(caption=recommendation)
-
-# ✅ توليد التوصية من المؤشرات (مثال ثابت)
-async def get_recommendation(pair):
-    time_now = datetime.now().strftime("%I:%M %p")
-    return f"""📊 التوصية: شراء (CALL)
-💱 الزوج: {pair} OTC
+    fake_time = datetime.now().strftime("%I:%M %p")
+    signal_text = f"""
+📊 التوصية: شراء (CALL)
+💱 الزوج: EUR/USD OTC
 🔍 التحليل:
 🔹 EMA:
 - EMA20 = 1.0891
@@ -118,15 +80,16 @@ async def get_recommendation(pair):
 - Bollinger → يعطي احتمالات الانعكاس
 
 ⏱️ الفريم: 1 دقيقة
-⏰ التوقيت: {time_now}."""
+⏰ التوقيت: {fake_time}
+"""
+    await bot.send_message(chat_id=chat_id, text=signal_text)
 
-# ✅ تشغيل البوت
-if __name__ == "__main__":
-    if not BOT_TOKEN or not ADMIN_ID or not ALPHA_VANTAGE_API_KEY:
-        raise Exception("❌ تأكد من إعداد المتغيرات: BOT_TOKEN و ADMIN_ID و ALPHA_VANTAGE_API_KEY")
-
+# ✅ بدء التشغيل
+if __name__ == '__main__':
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(manage_requests, pattern="^(accept|reject)_"))
-    app.add_handler(CallbackQueryHandler(handle_buttons, pattern="^(pair_|learn)"))
-    app.run_polling()
+    app.add_handler(CallbackQueryHandler(button_handler))
+
+    import asyncio
+    asyncio.run(app.run_polling())
