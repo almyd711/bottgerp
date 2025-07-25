@@ -16,20 +16,17 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "6964741705"))
 ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
 
-# إعداد سجل التشغيل
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# إعداد قاعدة البيانات
 conn = sqlite3.connect("bot_data.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# إنشاء الجداول إذا لم تكن موجودة
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
     username TEXT,
-    status TEXT DEFAULT 'pending',  -- pending, approved, rejected
+    status TEXT DEFAULT 'pending',
     proof TEXT DEFAULT NULL
 )
 ''')
@@ -48,12 +45,11 @@ CREATE TABLE IF NOT EXISTS recommendations (
     signal TEXT,
     indicators TEXT,
     timestamp TEXT,
-    result TEXT DEFAULT 'pending'  -- pending, win, lose
+    result TEXT DEFAULT 'pending'
 )
 ''')
 conn.commit()
 
-# أزواج العملات
 PAIRS = ["USD/CHF", "AUD/USD", "USD/JPY", "USD/CAD", "EUR/JPY", "EUR/CAD", "EUR/USD", "EUR/CHF", "EUR/AUD"]
 
 def get_pairs_keyboard():
@@ -77,29 +73,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if row:
         status = row[0]
         if status == "approved":
-            await update.message.reply_text(
-                f"👋 مرحباً {user.first_name}، اختر من القائمة:",
-                reply_markup=get_main_menu())
+            await update.message.reply_text(f"👋 مرحباً {user.first_name}، اختر من القائمة:", reply_markup=get_main_menu())
         elif status == "pending":
             await update.message.reply_text("🚫 طلبك قيد المراجعة، انتظر موافقة المدير.")
         else:
-            await update.message.reply_text(
-                "❌ تم رفض طلبك. ارسل 'طلب جديد' لإعادة التقديم.")
+            await update.message.reply_text("❌ تم رفض طلبك. ارسل 'طلب جديد' لإعادة التقديم.")
     else:
-        cursor.execute("INSERT OR IGNORE INTO users(user_id, username, status) VALUES (?, ?, 'pending')",
-                       (user.id, user.username))
+        cursor.execute("INSERT OR IGNORE INTO users(user_id, username, status) VALUES (?, ?, 'pending')", (user.id, user.username))
         conn.commit()
-        await update.message.reply_text(
-            "🚫 طلبك قيد المراجعة، انتظر موافقة المدير.")
-        # إشعار المدير
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"📥 طلب جديد من @{user.username} (ID: {user.id})"
-        )
+        await update.message.reply_text("🚫 طلبك قيد المراجعة، انتظر موافقة المدير.")
+        await context.bot.send_message(ADMIN_ID, f"📥 طلب جديد من @{user.username} (ID: {user.id})")
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
+    if update.effective_user.id != ADMIN_ID:
         return
     cursor.execute("SELECT user_id, username FROM users WHERE status='pending'")
     rows = cursor.fetchall()
@@ -116,8 +102,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
+    if update.effective_user.id != ADMIN_ID:
         return
     data = query.data
     if data.startswith("accept_"):
@@ -161,7 +146,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         save_recommendation(user.id, pair, signal, indicators)
         success_prob = calculate_success_probability(analysis["rsi"], analysis["bb_signal"], analysis["ema_signal"])
-
         now = datetime.now().strftime("%I:%M %p")
         msg = f"""
 📊 التوصية: {signal}
@@ -187,14 +171,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("🔁 إعادة التحليل: اختر الزوج:", reply_markup=get_pairs_keyboard())
 
     elif data == "learn":
-        text = """
+        await query.edit_message_text("""
 📘 تعلم التحليل الأساسي:
 - EMA: المتوسط المتحرك الأسي
 - RSI: مؤشر القوة النسبية
 - Bollinger Bands: نطاقات بولينجر
 - MACD: تقاطع المتوسطات المتحركة
-"""
-        await query.edit_message_text(text.strip())
+""".strip())
 
     elif data == "stats":
         cursor.execute("SELECT total_signals, wins FROM user_stats WHERE user_id=?", (user.id,))
@@ -212,37 +195,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ لا توجد بيانات إحصائية حتى الآن.")
 
     elif data == "subscribe":
-        text = """
+        await query.edit_message_text("""
 💳 طرق الدفع:
 - USDT BEP20: 0x3a5db3aec7c262017af9423219eb64b5eb6643d7
 - USDT TRC20: THrV9BLydZTYKox1MnnAivqitHBEz3xKiq
 - Payeer: P1113622813
 
 💡 بعد الدفع أرسل صورة إثبات الدفع هنا.
-"""
-        await query.edit_message_text(text.strip())
+""".strip())
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    cursor.execute("SELECT status FROM users WHERE user_id=?", (user.id,))
-    row = cursor.fetchone()
-    if not row or row[0] != "approved":
-        await update.message.reply_text("🚫 أنت غير مصرح لك بإرسال إثبات الدفع.")
-        return
-    if update.message.photo:
-        photo_file = await update.message.photo[-1].get_file()
-        path = f"proofs/{user.id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-        os.makedirs("proofs", exist_ok=True)
-        await photo_file.download_to_drive(path)
-        cursor.execute("UPDATE users SET proof=? WHERE user_id=?", (path, user.id))
-        conn.commit()
-        await update.message.reply_text("✅ تم استلام إثبات الدفع، انتظر التفعيل.")
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"📸 إثبات دفع جديد من @{user.username} (ID: {user.id})"
-        )
-    else:
-        await update.message.reply_text("❌ لم يتم إرسال صورة.")
+    await update.message.reply_text("✅ تم استلام إثبات الدفع، انتظر التفعيل.")
 
 def analyze_market(symbol):
     try:
@@ -253,21 +216,50 @@ def analyze_market(symbol):
         latest = list(time_series.values())[0]
         close_price = float(latest["4. close"])
         prices = [float(v["4. close"]) for v in list(time_series.values())[:50]]
-
         ema20 = sum(prices[:20]) / 20
         ema50 = sum(prices[:30]) / 30
-        rsi = 50 + (random.random() * 20 - 10)  # محاكاة RSI مؤقتة
+        rsi = 50 + (random.random() * 20 - 10)
         bb_upper = max(prices) + 0.002
         bb_lower = min(prices) - 0.002
-
         trend = "صاعد ✅" if ema20 > ema50 else "هابط 🔻"
-        bb_signal = "أعلى الحد العلوي" if close_price > bb_upper else (
-            "أسفل الحد السفلي" if close_price < bb_lower else "محايد")
+        bb_signal = "أعلى الحد العلوي" if close_price > bb_upper else ("أسفل الحد السفلي" if close_price < bb_lower else "محايد")
         ema_signal = "EMA20 > EMA50 ✅" if ema20 > ema50 else "EMA20 < EMA50 🔻"
         rsi_note = "✅ منطقة تداول طبيعية" if 30 < rsi < 70 else "⚠️ منطقة تشبع"
-
         return {
             "close": close_price,
             "ema20": round(ema20, 4),
             "ema50": round(ema50, 4),
             "rsi": round(rsi, 2),
+            "trend": trend,
+            "bb_signal": bb_signal,
+            "ema_signal": ema_signal,
+            "rsi_note": rsi_note
+        }
+    except Exception as e:
+        print(f"Error analyzing market: {e}")
+        return None
+
+def save_recommendation(user_id, pair, signal, indicators):
+    timestamp = datetime.now().isoformat()
+    cursor.execute("INSERT INTO recommendations(user_id, pair, signal, indicators, timestamp) VALUES (?, ?, ?, ?, ?)",
+                   (user_id, pair, signal, json.dumps(indicators), timestamp))
+    conn.commit()
+
+def calculate_success_probability(rsi, bb_signal, ema_signal):
+    score = 0
+    if 30 < rsi < 70:
+        score += 1
+    if "✅" in bb_signal:
+        score += 1
+    if "✅" in ema_signal:
+        score += 1
+    return int(score / 3 * 100)
+
+if __name__ == "__main__":
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CallbackQueryHandler(admin_actions, pattern="^(accept|reject)_"))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    app.run_polling()
