@@ -4,10 +4,7 @@ import sqlite3
 import json
 import requests
 from datetime import datetime
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    InputFile, ChatAction
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     CallbackQueryHandler, ContextTypes, filters
@@ -151,7 +148,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("pair_"):
         pair = data.split("_", 1)[1]
         await query.edit_message_text(f"📊 تحليل زوج {pair} جاري...")
-        # تحليل السوق
         analysis = analyze_market(pair)
         if not analysis:
             await query.edit_message_text("⚠️ تعذر الحصول على بيانات الزوج حالياً.")
@@ -163,9 +159,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "RSI": analysis["rsi"],
             "Bollinger": analysis["bb_signal"]
         }
-        # حفظ التوصية في DB
         save_recommendation(user.id, pair, signal, indicators)
-        # حساب نسبة الدقة (مبدئي، يمكن تطوير ML)
         success_prob = calculate_success_probability(analysis["rsi"], analysis["bb_signal"], analysis["ema_signal"])
 
         now = datetime.now().strftime("%I:%M %p")
@@ -243,13 +237,9 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("UPDATE users SET proof=? WHERE user_id=?", (path, user.id))
         conn.commit()
         await update.message.reply_text("✅ تم استلام إثبات الدفع، انتظر التفعيل.")
-        # إرسال إشعار للمطور
         await context.bot.send_message(
             ADMIN_ID,
-            f"📸 إثبات دفع جديد من @{user.username} (ID: {user.id})",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("فتح الإثبات", url=f"file://{os.path.abspath(path)}")
-            ]])
+            f"📸 إثبات دفع جديد من @{user.username} (ID: {user.id})"
         )
     else:
         await update.message.reply_text("❌ لم يتم إرسال صورة.")
@@ -280,50 +270,4 @@ def analyze_market(symbol):
             "close": close_price,
             "ema20": round(ema20, 4),
             "ema50": round(ema50, 4),
-            "rsi": round(rsi, 2),
-            "trend": trend,
-            "bb_signal": bb_signal,
-            "ema_signal": ema_signal,
-            "rsi_note": rsi_note
-        }
-    except Exception as e:
-        logger.error(f"Error analyzing market: {e}")
-        return None
-
-def save_recommendation(user_id, pair, signal, indicators):
-    cursor.execute('''
-        INSERT INTO recommendations (user_id, pair, signal, indicators, timestamp)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (user_id, pair, signal, json.dumps(indicators), datetime.now().isoformat()))
-
-    cursor.execute('''
-        INSERT OR IGNORE INTO user_stats(user_id) VALUES (?)
-    ''', (user_id,))
-
-    cursor.execute('''
-        UPDATE user_stats SET total_signals = total_signals + 1 WHERE user_id = ?
-    ''', (user_id,))
-
-    conn.commit()
-
-def calculate_success_probability(rsi, bb_signal, ema_signal):
-    score = 0
-    if bb_signal != "محايد":
-        score += 1
-    if "✅" in ema_signal:
-        score += 1
-    if 30 < rsi < 70:
-        score += 1
-    return int((score / 3) * 100)
-
-if __name__ == "__main__":
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(CallbackQueryHandler(admin_actions, pattern="^(accept|reject)_"))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
-
-    logger.info("Bot is starting...")
-    app.run_polling()
+            "rsi": round(r
