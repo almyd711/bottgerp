@@ -5,4 +5,3 @@ numpy
 ta
 python-dotenv
 Pillow
-sqlite3
